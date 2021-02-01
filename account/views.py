@@ -1,8 +1,11 @@
-from django.shortcuts import render
+from django.shortcuts import render, redirect
 from django.http import HttpResponse
-from django.contrib.auth import login, authenticate
-from account.forms import RegistrationForm
-from django.shortcuts import redirect
+from django.contrib.auth import login, logout, authenticate
+from django.conf import settings
+from django.db.models import Q
+
+from account.forms import RegistrationForm, AccountAuthenticationForm, AccountUpdateForm
+from .models import Account
 
 
 def register_view(request, *args, **kwargs):
@@ -19,7 +22,7 @@ def register_view(request, *args, **kwargs):
             raw_password = form.cleaned_data['password1']
             account = authenticate(email=email, password=raw_password)
             login(request, account)
-            destination = kwargs.get("next")
+            destination = get_redirect_if_exists(request)
             if destination:
                 return redirect("personal:home")
         else:
@@ -64,4 +67,108 @@ def get_redirect_if_exists(request):
     if request.GET:
         if request.GET.get("next"):
             redirect = str(request.GET.get("next"))
+            print(f"REDIRECT = {redirect}")
     return redirect
+
+
+def logout_view(request):
+    logout(request)
+    return redirect('personal:home')
+
+
+def account_view(request, *args, **kwargs):
+    """
+    - Logic here is kind of tricky
+            is_self (boolean)
+                    is_friend (boolean)
+                            -1: NO_REQUEST_SENT
+                            0: THEM_SENT_TO_YOU
+                            1: YOU_SENT_TO_THEM
+    """
+    context = {}
+    user_id = kwargs.get("user_id")
+    try:
+        account = Account.objects.get(pk=user_id)
+    except:
+        return HttpResponse("Something went wrong.")
+    if account:
+        context['id'] = account.id
+        context['username'] = account.username
+        context['email'] = account.email
+        context['profile_image'] = account.profile_image.url
+        context['hide_email'] = account.hide_email
+
+        # Define state template variables
+        is_self = True
+        is_friend = False
+        user = request.user
+        if user.is_authenticated and user != account:
+            is_self = False
+        elif not user.is_authenticated:
+            is_self = False
+
+        # Set the template variables to the values
+        context['is_self'] = is_self
+        context['is_friend'] = is_friend
+        context['BASE_URL'] = settings.BASE_URL
+        return render(request, "account/account.html", context)
+
+
+def account_search_view(request, *args, **kwargs):
+    print("Ccc")
+    context = {}
+    if request.method == "GET":
+        search_query = request.GET.get("q")
+        print(f"Quer = {search_query}")
+        if len(search_query) > 0:
+            search_results = Account.objects.filter(Q(email__icontains=search_query) |
+                                                    Q(username__icontains=search_query)).distinct()
+            user = request.user
+            accounts = []  # [(account1, True), (account2, False), ...]
+            for account in search_results:
+                accounts.append((account, False))  # you have no friends yet
+            context['accounts'] = accounts
+
+    return render(request, "account/search_results.html", context)
+
+
+def edit_account_view(request, *args, **kwargs):
+    if not request.user.is_authenticated:
+        return redirect("login")
+    user_id = kwargs.get("user_id")
+    print(f'ID= {user_id}')
+    account = Account.objects.get(pk=user_id)
+    if account.pk != request.user.pk:
+        return HttpResponse("You cannot edit someone elses profile.")
+    context = {}
+    if request.POST:
+        form = AccountUpdateForm(
+            request.POST, request.FILES, instance=request.user)
+        if form.is_valid():
+            form.save()
+            new_username = form.cleaned_data['username']
+            return redirect("account:profile", user_id=account.pk)
+        else:
+            form = AccountUpdateForm(request.POST, instance=request.user,
+                                     initial={
+                                         "id": account.pk,
+                                         "email": account.email,
+                                         "username": account.username,
+                                         "profile_image": account.profile_image,
+                                         "hide_email": account.hide_email,
+                                     }
+                                     )
+            context['form'] = form
+    else:
+        form = AccountUpdateForm(
+            initial={
+                "id": account.pk,
+                "email": account.email,
+                "username": account.username,
+                "profile_image": account.profile_image,
+                "hide_email": account.hide_email,
+            }
+        )
+        context['form'] = form
+    context['DATA_UPLOAD_MAX_MEMORY_SIZE'] = settings.DATA_UPLOAD_MAX_MEMORY_SIZE
+    return render(request, "account/edit_account.html", context)
